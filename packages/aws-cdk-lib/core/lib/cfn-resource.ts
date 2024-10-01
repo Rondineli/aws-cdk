@@ -78,6 +78,8 @@ export class CfnResource extends CfnRefElement {
    */
   private readonly dependsOn = new Set<CfnResource>();
 
+  private overrideProperties: any = [];
+
   /**
    * Creates a resource construct.
    * @param cfnResourceType The CloudFormation type of this resource (e.g. AWS::DynamoDB::Table)
@@ -239,19 +241,23 @@ export class CfnResource extends CfnRefElement {
 
     while (parts.length > 1) {
       const key = parts.shift()!;
-
       // if we can't recurse further or the previous value is not an
       // object overwrite it with an object.
       const isObject = curr[key] != null && typeof(curr[key]) === 'object' && !Array.isArray(curr[key]);
       if (!isObject) {
         curr[key] = {};
       }
-
-      curr = curr[key];
     }
-
+    /* eslint-enable no-console */
     const lastKey = parts.shift()!;
     curr[lastKey] = value;
+    /* eslint-disable no-console */
+    console.log(`\nAdding to the overrideProperties properties: ${JSON.stringify({
+      paths: splitOnPeriods(path),
+      value,
+    })}`);
+    /* eslint-enable no-console */
+    this.overrideProperties.push({ path: splitOnPeriods(path), value });
   }
 
   /**
@@ -451,6 +457,59 @@ export class CfnResource extends CfnRefElement {
               // as that's how removing overrides are represented as
               removeEmpty: false,
             });
+
+            //resourceDef = deepMerge(resourceDef, resolvedRawOverrides);
+            if (JSON.stringify(renderedProps) !== '{}') {
+              for (const resolvedProp of context.resolve(this.overrideProperties)) {
+                //const finalValue = context.resolve(resolvedProp.value);
+
+                const pathDots = resolvedProp.path;
+
+                if (resolvedProp.value !== undefined && pathDots !== undefined) {
+
+                  const lastKey = pathDots[pathDots.length - 1];
+
+                  // Traverse the path except the last key
+                  let target = pathDots.slice(0, -1).reduce((acc: any, key: any) => {
+                    if (typeof key === 'number') {
+                      // If the key is a number, ensure it's an array
+                      if (!Array.isArray(acc)) {
+                        acc = [];
+                      }
+
+                      // Initialize the array element if it doesn't exist
+                      if (!acc[key]) {
+                        acc[key] = {};
+                      }
+                    } else {
+                      // If the key is a string, ensure it's an object
+                      if (!acc[key]) {
+                        acc[key] = {};
+                      }
+                    }
+
+                    return acc[key];
+                  }, resourceDef);
+
+                  // Insert the value at the final location
+                  if (typeof lastKey === 'number') {
+                    // Ensure the target is an array at the final step
+                    if (!Array.isArray(target)) {
+                      target = [];
+                    }
+                    target[lastKey] = resolvedProp.value;
+                  } else {
+                    target[lastKey] = resolvedProp.value;
+                  }
+                }
+              };
+              /* eslint-disable no-console */
+              console.log(`\nReturning final resolvedProps: ${JSON.stringify({
+                resourceDef,
+              })}`);
+              /* eslint-enable no-console */
+              return resourceDef;
+            }
             return deepMerge(resourceDef, resolvedRawOverrides);
           }),
         },
@@ -620,6 +679,7 @@ export interface ICfnResourceOptions {
  *
  * @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/intrinsic-function-reference.html
  */
+
 const MERGE_EXCLUDE_KEYS: string[] = [
   'Ref',
   'Fn::Base64',
@@ -638,31 +698,6 @@ const MERGE_EXCLUDE_KEYS: string[] = [
   'Fn::If',
   'Fn::Not',
   'Fn::Or',
-];
-/**
- * Possible wafv2 empty objects edge cases
- *  It likelly to have explictly empty keys and subkeys,
- *
- * This list will avoid the target be deleted at the end of the deepMerge
- * MERGE_EXCLUDE_KEYS makes it be added to the target[key] but does not
- * avoid the edge case keys be deleted at end as they will be empty all the way trough.
- * i.e:
- *   "Count": {}
- *   // or
- *   "Action": {"Count": {}}
- *   // or
- *   "FieldToMatch": {}
- * https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-wafv2-webacl-ruleaction.html
- */
-const DELETE_EXCLUDE_KEYS: string[] = [
-  'Action',
-  'Block',
-  'Captcha',
-  'Challenge',
-  'Count',
-  'UriPath',
-  'FieldToMatch',
-  'QueryString',
 ];
 
 /**
@@ -750,17 +785,7 @@ function deepMerge(target: any, ...sources: any[]) {
         // sibling concrete values alongside, so we can delete this tree.
         const output = target[key];
         if (typeof(output) === 'object' && Object.keys(output).length === 0) {
-          /**
-           * Some edge cases like WafV2 properties are being deleted causing
-           * for instance `addOverrideProperty` and `addOverride` method to fail including
-           * the keys referenced at `DELETE_EXCLUDE_KEYS` constant to be delete when final template
-           * is rendered.
-           * This will allow these keys be supported and stop Cloudformation complain
-           * about the missing Property keys inside the Rule objects
-           */
-          if (!DELETE_EXCLUDE_KEYS.includes(key)) {
-            delete target[key];
-          }
+          delete target[key];
         }
       } else if (value === undefined) {
         delete target[key];
